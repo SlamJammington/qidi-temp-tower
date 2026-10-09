@@ -1,0 +1,17 @@
+{
+    "name": "Test Vendor",
+    "version": "01.00.00.00",
+    "machine_list": [
+        {"name": "fdm_machine_test_common", "sub_path": "machine/fdm_machine_test_common.json"},
+        {"name": "Test Printer 0.4 nozzle", "sub_path": "machine/Test Printer 0.4 nozzle.json"}
+    ],
+    "process_list": [
+        {"name": "fdm_process_test_common", "sub_path": "process/fdm_process_test_common.json"},
+        {"name": "0.20mm Standard @Test", "sub_path": "process/0.20mm Standard @Test.json"}
+    ],
+    "filament_list": [
+        {"name": "fdm_filament_test_common", "sub_path": "filament/fdm_filament_test_common.json"},
+        {"name": "Test PLA", "sub_path": "filament/Test PLA.json"},
+        {"name": "Other PLA", "sub_path": "filament/Other PLA.json"}
+    ]
+}

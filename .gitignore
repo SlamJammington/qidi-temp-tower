@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*.3mf
+*.3mf.tmp
+*.gcode
+out/
+.venv/
+.DS_Store
+Thumbs.db

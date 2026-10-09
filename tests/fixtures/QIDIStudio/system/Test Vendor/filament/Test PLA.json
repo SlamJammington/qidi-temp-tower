@@ -1,0 +1,3 @@
+{"type": "filament", "name": "Test PLA", "from": "system", "instantiation": "true", "filament_id": "TST01",
+ "inherits": "fdm_filament_test_common", "compatible_printers": ["Test Printer 0.4 nozzle"],
+ "default_filament_colour": ["#3366FF"]}

@@ -1,0 +1,2 @@
+{"type": "machine", "name": "Test Printer 0.4 nozzle", "from": "system", "instantiation": "true",
+ "inherits": "fdm_machine_test_common", "printer_model": "Test Printer", "printer_variant": "0.4"}
