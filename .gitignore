@@ -7,3 +7,5 @@ out/
 .venv/
 .DS_Store
 Thumbs.db
+build/
+dist/

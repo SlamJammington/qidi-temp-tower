@@ -10,6 +10,10 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qidi_profiles as qp  # noqa: E402
 import temp_tower as tt  # noqa: E402
+from tower_geometry import HERE as DATA_DIR  # noqa: E402
+
+__version__ = "1.0.0"
+APP_NAME = "QIDI Studio Temperature Tower"
 
 def _windows_install_dirs():
     dirs = [os.path.join(os.environ.get(v, d), "QIDIStudio")
@@ -93,7 +97,13 @@ def default_output(store, filament, temps):
 
 # ---------------------------------------------------------------------- CLI
 def run_cli(argv):
-    ap = argparse.ArgumentParser(description=__doc__)
+    for stream in (sys.stdout, sys.stderr):
+        try:  # a preset name the console's code page can't show shouldn't crash the listing
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+    ap = argparse.ArgumentParser(prog="qidi_temp_tower", description=__doc__)
+    ap.add_argument("--version", action="version", version="%(prog)s " + __version__)
     ap.add_argument("--qidi-dir", help="QIDI Studio data folder (default: %s)" % qp.default_root().replace("%", "%%"))
     ap.add_argument("--printer", help="printer preset (default: the one selected in QIDI Studio)")
     ap.add_argument("--process", help="process preset (default: the one selected in QIDI Studio)")
@@ -149,7 +159,11 @@ def run_gui():
     except (AttributeError, OSError):
         pass
     root = tk.Tk()
-    root.title("QIDI Studio Temperature Tower")
+    root.title("%s %s" % (APP_NAME, __version__))
+    try:
+        root.iconphoto(True, tk.PhotoImage(file=os.path.join(DATA_DIR, "assets", "icon.png")))
+    except tk.TclError:
+        pass
     root.minsize(560, 0)
 
     state = {"store": None}
@@ -367,7 +381,62 @@ def run_gui():
     root.mainloop()
 
 
+def _parent_pid(pid):
+    """Parent process id on Windows (None if unknown)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
+                    ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260)]
+
+    k32 = ctypes.windll.kernel32
+    k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    snap = k32.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
+    if not snap or snap == ctypes.c_void_p(-1).value:
+        return None
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        ok = k32.Process32FirstW(ctypes.c_void_p(snap), ctypes.byref(entry))
+        while ok:
+            if entry.th32ProcessID == pid:
+                return entry.th32ParentProcessID
+            ok = k32.Process32NextW(ctypes.c_void_p(snap), ctypes.byref(entry))
+    finally:
+        k32.CloseHandle(ctypes.c_void_p(snap))
+    return None
+
+
+def attach_console():
+    """Let the windowed Windows build print when it's run from a terminal.
+
+    The one-file build runs as two processes (a small unpacker, then this
+    one), so the terminal is our grandparent rather than our parent.
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    k32.GetStdHandle.restype = ctypes.c_void_p
+    handle = k32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+    if handle and handle != ctypes.c_void_p(-1).value and k32.GetFileType(ctypes.c_void_p(handle)) in (1, 3):
+        return  # FILE_TYPE_DISK / FILE_TYPE_PIPE: output is redirected, leave it there
+    attached = k32.AttachConsole(-1)  # the parent's console
+    if not attached:
+        grandparent = _parent_pid(os.getppid())
+        attached = bool(grandparent) and k32.AttachConsole(grandparent)
+    if attached:
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8")
+        sys.stderr = sys.stdout
+        print()  # the shell has already printed its prompt
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
+        attach_console()
         sys.exit(run_cli(sys.argv[1:]))
     run_gui()

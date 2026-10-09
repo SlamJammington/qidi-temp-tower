@@ -19,8 +19,10 @@ import json
 import math
 import os
 import struct
+import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# Inside a PyInstaller bundle the data files are unpacked to sys._MEIPASS.
+HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 DIGITS = os.path.join(HERE, "assets", "digits.json")
 
 FLOOR_H = 10.0       # height of one temperature step
