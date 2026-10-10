@@ -1,5 +1,6 @@
-# Dev-time builder for assets/digits.json (end users don't need it). Run with
-# FreeCAD's interpreter, which bundles DejaVu Sans Bold through matplotlib:
+# Dev-time builder for assets/digits.json: the digits and a decimal point used
+# for engraved labels (end users don't need it). Run with FreeCAD's
+# interpreter, which bundles DejaVu Sans Bold through matplotlib:
 #   "C:\Program Files\FreeCAD 1.0\bin\freecadcmd.exe" tools/build_digits.py
 # Set TT_FONT to use a different TrueType font.
 #
@@ -53,6 +54,13 @@ def main():
     size = 10.0 * DIGIT_H / Part.Compound([w for c in probe for w in c]).BoundBox.YLength
     pair = Part.makeWireString("00", fontdir, fontfile, size, 0)
     advance = Part.Compound(pair[1]).BoundBox.XMin - Part.Compound(pair[0]).BoundBox.XMin
+    zero_left = Part.Compound(Part.makeWireString("0", fontdir, fontfile, size, 0)[0]).BoundBox.XMin
+
+    def advance_of(ch):
+        """Pen advance after `ch`: where a following "0" starts, less the 0's own left bearing."""
+        wires = Part.makeWireString(ch + "0", fontdir, fontfile, size, 0)
+        return Part.Compound(wires[1]).BoundBox.XMin - zero_left
+
     # Rotation about X: (u, v, w) -> (u, -w, v), so the glyph stands on the
     # front face and w in [-depth, overshoot] becomes y in [-overshoot, depth].
     rot = App.Matrix(1, 0, 0, 0,
@@ -60,14 +68,15 @@ def main():
                      0, 1, 0, 0,
                      0, 0, 0, 1)
     glyphs = {}
-    for ch in "0123456789":
+    for ch in "0123456789.":
         face = Part.makeFace(Part.makeWireString(ch, fontdir, fontfile, size, 0)[0], "Part::FaceMakerBullseye")
         prism = face.extrude(App.Vector(0, 0, -(TEXT_DEPTH + TEXT_OVERSHOOT)))
         prism.translate(App.Vector(0, 0, TEXT_OVERSHOOT))
         prism = prism.transformGeometry(rot)
         bb = prism.optimalBoundingBox()
-        glyphs[ch] = dict(pack(prism), xmin=bb.XMin, xmax=bb.XMax, zmin=bb.ZMin, zmax=bb.ZMax)
-        print(f"{ch}: {glyphs[ch]['tcount']} triangles, x {bb.XMin:.2f}..{bb.XMax:.2f}")
+        glyphs[ch] = dict(pack(prism), xmin=bb.XMin, xmax=bb.XMax, zmin=bb.ZMin, zmax=bb.ZMax,
+                          advance=advance_of(ch))
+        print(f"{ch}: {glyphs[ch]['tcount']} triangles, x {bb.XMin:.2f}..{bb.XMax:.2f}, advance {glyphs[ch]['advance']:.2f}")
     data = {"font": fontfile, "digit_height": DIGIT_H, "depth": TEXT_DEPTH, "overshoot": TEXT_OVERSHOOT,
             "advance": advance, "glyphs": glyphs}
     with open(OUT, "w") as f:

@@ -1,66 +1,20 @@
-"""QIDI Studio temperature tower generator (GUI, or command line with --help)."""
+"""QIDI Studio temperature tower and retraction test generator (GUI, or command line with --help)."""
 import argparse
 import os
 import re
-import shutil
-import subprocess
 import sys
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qidi_profiles as qp  # noqa: E402
+import printer_upload as pu  # noqa: E402
+import retraction_test as rt  # noqa: E402
 import temp_tower as tt  # noqa: E402
+from studio import cli_command, open_in_studio, studio_command  # noqa: E402
 from tower_geometry import HERE as DATA_DIR  # noqa: E402
 
-__version__ = "1.0.0"
-APP_NAME = "QIDI Studio Temperature Tower"
-
-def _windows_install_dirs():
-    dirs = [os.path.join(os.environ.get(v, d), "QIDIStudio")
-            for v, d in (("ProgramFiles", r"C:\Program Files"), ("ProgramFiles(x86)", r"C:\Program Files (x86)"))]
-    try:  # the installer records its folder in the uninstall key
-        import winreg
-        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-            try:
-                base = winreg.OpenKey(hive, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall")
-            except OSError:
-                continue
-            for i in range(winreg.QueryInfoKey(base)[0]):
-                try:
-                    sub = winreg.OpenKey(base, winreg.EnumKey(base, i))
-                    if "qidistudio" in str(winreg.QueryValueEx(sub, "DisplayName")[0]).lower().replace(" ", ""):
-                        dirs.append(winreg.QueryValueEx(sub, "InstallLocation")[0])
-                except OSError:
-                    pass
-    except ImportError:
-        pass
-    return dirs
-
-
-def studio_command():
-    """Command prefix that opens a file in QIDI Studio, or None if it isn't installed."""
-    if sys.platform == "win32":
-        for d in _windows_install_dirs():
-            exe = os.path.join(d, "qidi-studio.exe")
-            if d and os.path.isfile(exe):
-                return [exe]
-    elif sys.platform == "darwin":
-        for app in ("/Applications/QIDIStudio.app", os.path.expanduser("~/Applications/QIDIStudio.app")):
-            if os.path.isdir(app):
-                return ["open", "-a", app]
-    for name in ("qidi-studio", "QIDIStudio", "qidistudio"):
-        exe = shutil.which(name)
-        if exe:
-            return [exe]
-    return None
-
-
-def open_in_studio(path):
-    cmd = studio_command()
-    if not cmd:
-        raise FileNotFoundError("QIDI Studio was not found; open the 3MF yourself")
-    subprocess.Popen(cmd + [path])
-
+__version__ = "1.1.0"
+APP_NAME = "QIDI Studio Calibration Towers"
 
 def filament_defaults(store, filament):
     """(start, end, step) suggested from the filament's recommended range, hottest at the bottom."""
@@ -95,6 +49,27 @@ def default_output(store, filament, temps):
                         safe_filename("Temp Tower %s %d-%d" % (short, temps[0], temps[-1])) + ".3mf")
 
 
+def default_retraction_output(store, filament, values):
+    short = filament.split("@")[0].strip()
+    return os.path.join(default_output_dir(store), safe_filename(
+        "Retraction Test %s %s-%smm" % (short, rt.fmt(values[0]), rt.fmt(values[-1]))) + ".gcode")
+
+
+def pick_network_printer(store, name=None):
+    """A network printer saved in QIDI Studio, by name (default: the first one)."""
+    printers = store.network_printers()
+    if not printers:
+        raise ValueError("No network printer is set up in QIDI Studio. Add one there (the Wi-Fi icon next to "
+                         "the printer), or copy the .gcode to the printer yourself.")
+    if not name:
+        return printers[0]
+    for p in printers:
+        if p.get("name") == name:
+            return p
+    raise ValueError("No network printer called %r. QIDI Studio has: %s" % (
+        name, ", ".join(p.get("name", "?") for p in printers)))
+
+
 # ---------------------------------------------------------------------- CLI
 def run_cli(argv):
     for stream in (sys.stdout, sys.stderr):
@@ -104,19 +79,26 @@ def run_cli(argv):
             pass
     ap = argparse.ArgumentParser(prog="qidi_temp_tower", description=__doc__)
     ap.add_argument("--version", action="version", version="%(prog)s " + __version__)
+    ap.add_argument("--test", choices=["temperature", "retraction"], default="temperature",
+                    help="which test to make (default: temperature)")
     ap.add_argument("--qidi-dir", help="QIDI Studio data folder (default: %s)" % qp.default_root().replace("%", "%%"))
     ap.add_argument("--printer", help="printer preset (default: the one selected in QIDI Studio)")
     ap.add_argument("--process", help="process preset (default: the one selected in QIDI Studio)")
     ap.add_argument("--filament", help="filament preset (default: the one selected in QIDI Studio)")
-    ap.add_argument("--start", type=int, help="bottom floor temperature (default: filament max)")
-    ap.add_argument("--end", type=int, help="top floor temperature (default: filament min)")
-    ap.add_argument("--step", type=int, default=5)
-    ap.add_argument("--wait", action="store_true", help="use M109 (wait) instead of M104")
+    ap.add_argument("--start", type=float, help="bottom value: °C, or mm of retraction (default: from the presets)")
+    ap.add_argument("--end", type=float, help="top value (default: from the presets)")
+    ap.add_argument("--step", type=float, help="step between floors/bands (default: 5 °C, or 0.2/0.5 mm)")
+    ap.add_argument("--wait", action="store_true", help="temperature: use M109 (wait) instead of M104")
     ap.add_argument("--no-settings", action="store_true",
-                    help="don't embed presets; QIDI Studio keeps whatever is selected")
+                    help="temperature: don't embed presets; QIDI Studio keeps whatever is selected")
+    ap.add_argument("--band-height", type=float, default=5.0, help="retraction: height of each band in mm")
+    ap.add_argument("--temp", type=int, help="retraction: nozzle temperature (default: the filament preset's)")
+    ap.add_argument("--send", nargs="?", const="", metavar="PRINTER",
+                    help="retraction: upload the G-code to a network printer saved in QIDI Studio (default: the first)")
+    ap.add_argument("--print-now", action="store_true", help="retraction: with --send, start printing once uploaded")
     ap.add_argument("--list", choices=["printer", "process", "filament"], help="list presets and exit")
     ap.add_argument("--open", action="store_true", help="open the result in QIDI Studio")
-    ap.add_argument("-o", "--output", help="output .3mf path")
+    ap.add_argument("-o", "--output", help="output file")
     ap.add_argument("--cli", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
 
@@ -134,15 +116,31 @@ def run_cli(argv):
     for kind, name in (("machine", machine), ("process", process), ("filament", filament)):
         if not name or not store.get(kind, name):
             sys.exit(f"{kind} preset not found: {name!r} (use --list)")
-    d_start, d_end, _ = filament_defaults(store, filament)
-    temps = tt.temperatures(a.start if a.start is not None else d_start,
-                            a.end if a.end is not None else d_end, a.step)
-    out = a.output or default_output(store, filament, temps)
-    r = tt.write_3mf(out, temps, store=store, machine=machine, process=process, filament=filament,
-                     wait=a.wait, embed_settings=not a.no_settings)
-    print("Wrote %s\n  %d floors, %g mm tall, %s at z = %s" % (
-        r["path"], r["floors"], r["height"], r["command"],
-        ", ".join("%g (%d°C)" % c for c in r["changes"])))
+
+    if a.test == "retraction":
+        d_start, d_end, d_step = rt.defaults(store, machine)
+        values = rt.lengths(d_start if a.start is None else a.start, d_end if a.end is None else a.end,
+                            d_step if a.step is None else a.step)
+        out = a.output or default_retraction_output(store, filament, values)
+        target = pick_network_printer(store, a.send) if a.send is not None else None
+        r = rt.generate(out, values, store=store, machine=machine, process=process, filament=filament,
+                        band_h=a.band_height, nozzle_temp=a.temp, progress=print)
+        print("Wrote %s\n  %d bands of %g mm (%g mm tall), retraction from the bottom: %s mm" % (
+            r["path"], r["bands"], a.band_height, r["height"], ", ".join(rt.fmt(x) for x in values)))
+        if target:
+            print("Sending to %s…" % pu.describe(target))
+            pu.upload(target, out, start=a.print_now)
+            print("Uploaded%s." % (" and started printing" if a.print_now else ""))
+    else:
+        d_start, d_end, d_step = filament_defaults(store, filament)
+        temps = tt.temperatures(d_start if a.start is None else a.start, d_end if a.end is None else a.end,
+                                d_step if a.step is None else a.step)
+        out = a.output or default_output(store, filament, temps)
+        r = tt.write_3mf(out, temps, store=store, machine=machine, process=process, filament=filament,
+                         wait=a.wait, embed_settings=not a.no_settings)
+        print("Wrote %s\n  %d floors, %g mm tall, %s at z = %s" % (
+            r["path"], r["floors"], r["height"], r["command"],
+            ", ".join("%g (%d°C)" % c for c in r["changes"])))
     if a.open:
         open_in_studio(out)
     return 0
@@ -150,6 +148,8 @@ def run_cli(argv):
 
 # ---------------------------------------------------------------------- GUI
 def run_gui():
+    import queue
+    import threading
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
 
@@ -166,14 +166,20 @@ def run_gui():
         pass
     root.minsize(560, 0)
 
-    state = {"store": None}
-    v = {k: tk.StringVar() for k in ("dir", "printer", "process", "filament", "start", "end",
-                                     "step", "info", "summary", "output")}
+    state = {"store": None, "busy": False}
+    v = {k: tk.StringVar() for k in ("dir", "printer", "process", "filament", "info",
+                                     "start", "end", "step", "summary", "output",
+                                     "r_start", "r_end", "r_step", "r_band", "r_temp", "r_summary", "r_output",
+                                     "r_send")}
     v_wait = tk.BooleanVar(value=False)
     v_embed = tk.BooleanVar(value=True)
     v_all = tk.BooleanVar(value=False)
+    v_print_now = tk.BooleanVar(value=False)
     v["dir"].set(qp.default_root())
     v["step"].set("5")
+    v["r_band"].set("5")
+    status = tk.StringVar()
+    can_slice = cli_command() is not None
 
     frm = ttk.Frame(root, padding=12)
     frm.grid(sticky="nsew")
@@ -181,17 +187,17 @@ def run_gui():
     frm.columnconfigure(1, weight=1)
     row = 0
 
-    def label(text, r, **kw):
-        ttk.Label(frm, text=text).grid(row=r, column=0, sticky="w", padx=(0, 8), pady=3, **kw)
+    def label(parent, text, r):
+        ttk.Label(parent, text=text).grid(row=r, column=0, sticky="w", padx=(0, 8), pady=3)
 
-    label("QIDI Studio folder", row)
+    label(frm, "QIDI Studio folder", row)
     ttk.Entry(frm, textvariable=v["dir"]).grid(row=row, column=1, sticky="ew", pady=3)
     ttk.Button(frm, text="Browse…", command=lambda: browse_dir()).grid(row=row, column=2, padx=(6, 0))
     row += 1
 
     combos = {}
     for key, text in (("printer", "Printer"), ("process", "Process"), ("filament", "Filament")):
-        label(text, row)
+        label(frm, text, row)
         cb = ttk.Combobox(frm, textvariable=v[key], state="readonly", height=25)
         cb.grid(row=row, column=1, columnspan=2, sticky="ew", pady=3)
         combos[key] = cb
@@ -203,54 +209,121 @@ def run_gui():
                                                                     sticky="w", pady=(2, 8))
     row += 1
 
-    temps_frm = ttk.Frame(frm)
-    temps_frm.grid(row=row, column=1, columnspan=2, sticky="w")
-    label("Temperatures", row)
-    for i, (key, text) in enumerate((("start", "Bottom"), ("end", "Top"), ("step", "Step"))):
-        ttk.Label(temps_frm, text=text).grid(row=0, column=2 * i, padx=(0 if i == 0 else 12, 4))
-        sp = ttk.Spinbox(temps_frm, textvariable=v[key], from_=1 if key == "step" else 100,
-                         to=50 if key == "step" else 500, increment=1 if key == "step" else 5, width=6,
-                         command=lambda: update_summary())
-        sp.grid(row=0, column=2 * i + 1)
-        sp.bind("<KeyRelease>", lambda e: update_summary())
-    ttk.Label(temps_frm, text="°C").grid(row=0, column=6, padx=(4, 0))
-    ttk.Button(temps_frm, text="Use filament range", command=lambda: apply_filament_range()).grid(
-        row=0, column=7, padx=(12, 0))
-    row += 1
-    ttk.Label(frm, textvariable=v["summary"], foreground="#555").grid(row=row, column=1, columnspan=2,
-                                                                       sticky="w", pady=(2, 8))
+    tabs = ttk.Notebook(frm)
+    tabs.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(4, 0))
     row += 1
 
-    label("Options", row)
-    ttk.Checkbutton(frm, text="Wait for each temperature (M109) instead of changing on the fly (M104)",
-                    variable=v_wait).grid(row=row, column=1, columnspan=2, sticky="w")
-    row += 1
-    ttk.Checkbutton(frm, text="Embed the printer / process / filament presets in the 3MF",
-                    variable=v_embed).grid(row=row, column=1, columnspan=2, sticky="w")
-    row += 1
+    def spin_row(parent, r, title, fields, unit, extra=None):
+        label(parent, title, r)
+        box = ttk.Frame(parent)
+        box.grid(row=r, column=1, columnspan=2, sticky="w")
+        col = 0
+        for key, text, lo, hi, inc in fields:
+            if text:
+                ttk.Label(box, text=text).grid(row=0, column=col, padx=(0 if col == 0 else 12, 4))
+            sp = ttk.Spinbox(box, textvariable=v[key], from_=lo, to=hi, increment=inc, width=6,
+                             command=lambda: update_summaries())
+            sp.grid(row=0, column=col + 1)
+            sp.bind("<KeyRelease>", lambda e: update_summaries())
+            col += 2
+        ttk.Label(box, text=unit).grid(row=0, column=col, padx=(4, 0))
+        if extra:
+            ttk.Button(box, text=extra[0], command=extra[1]).grid(row=0, column=col + 1, padx=(12, 0))
 
-    label("Save as", row)
-    ttk.Entry(frm, textvariable=v["output"]).grid(row=row, column=1, sticky="ew", pady=(10, 3))
-    ttk.Button(frm, text="Browse…", command=lambda: browse_out()).grid(row=row, column=2, padx=(6, 0),
-                                                                     pady=(10, 3))
-    row += 1
+    def save_row(parent, r, key, kind):
+        label(parent, "Save as", r)
+        ttk.Entry(parent, textvariable=v[key]).grid(row=r, column=1, sticky="ew", pady=(10, 3))
+        ttk.Button(parent, text="Browse…", command=lambda: browse_out(key, kind)).grid(
+            row=r, column=2, padx=(6, 0), pady=(10, 3))
+
+    # Temperature tower tab
+    t_tab = ttk.Frame(tabs, padding=10)
+    t_tab.columnconfigure(1, weight=1)
+    tabs.add(t_tab, text="Temperature tower")
+    spin_row(t_tab, 0, "Temperatures", [("start", "Bottom", 100, 500, 5), ("end", "Top", 100, 500, 5),
+                                        ("step", "Step", 1, 50, 1)], "°C",
+             ("Use filament range", lambda: apply_filament_range()))
+    ttk.Label(t_tab, textvariable=v["summary"], foreground="#555").grid(row=1, column=1, columnspan=2,
+                                                                         sticky="w", pady=(2, 8))
+    label(t_tab, "Options", 2)
+    ttk.Checkbutton(t_tab, text="Wait for each temperature (M109) instead of changing on the fly (M104)",
+                    variable=v_wait).grid(row=2, column=1, columnspan=2, sticky="w")
+    ttk.Checkbutton(t_tab, text="Embed the printer / process / filament presets in the 3MF",
+                    variable=v_embed).grid(row=3, column=1, columnspan=2, sticky="w")
+    save_row(t_tab, 4, "output", "3mf")
+
+    # Retraction test tab
+    r_tab = ttk.Frame(tabs, padding=10)
+    r_tab.columnconfigure(1, weight=1)
+    tabs.add(r_tab, text="Retraction test")
+    spin_row(r_tab, 0, "Retraction", [("r_start", "Bottom", 0, 15, 0.1), ("r_end", "Top", 0, 15, 0.1),
+                                      ("r_step", "Step", 0.05, 5, 0.05)], "mm",
+             ("Use defaults", lambda: apply_retraction_defaults()))
+    ttk.Label(r_tab, textvariable=v["r_summary"], foreground="#555").grid(row=1, column=1, columnspan=2,
+                                                                           sticky="w", pady=(2, 8))
+    spin_row(r_tab, 2, "Band height", [("r_band", "", 2, 20, 1)], "mm")
+    spin_row(r_tab, 3, "Nozzle", [("r_temp", "", 100, 500, 5)],
+             "°C   (use the best floor from your temperature tower)")
+    label(r_tab, "Send to", 4)
+    send_box = ttk.Frame(r_tab)
+    send_box.grid(row=4, column=1, columnspan=2, sticky="w")
+    send_combo = ttk.Combobox(send_box, textvariable=v["r_send"], state="readonly", width=30)
+    send_combo.grid(row=0, column=0)
+    ttk.Checkbutton(send_box, text="Start printing right away", variable=v_print_now).grid(
+        row=0, column=1, padx=(12, 0))
+    save_row(r_tab, 5, "r_output", "gcode")
+    ttk.Label(r_tab, foreground="#555", wraplength=560, justify="left", text=(
+        "QIDI Studio can't change retraction by height, so this test is sliced for you with QIDI Studio and "
+        "saved as ready-to-print G-code. QIDI Studio can preview it but can't send it, so use "
+        "\"Generate & send to printer\" or copy it to the printer yourself." if can_slice else
+        "QIDI Studio wasn't found. It's needed to slice the retraction test.")).grid(
+        row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
     btns = ttk.Frame(frm)
     btns.grid(row=row, column=0, columnspan=3, sticky="e", pady=(10, 0))
-    ttk.Button(btns, text="Generate", command=lambda: generate(False)).grid(row=0, column=0, padx=4)
-    open_btn = ttk.Button(btns, text="Generate & open in QIDI Studio", command=lambda: generate(True))
+    gen_btn = ttk.Button(btns, text="Generate", command=lambda: generate(None))
+    gen_btn.grid(row=0, column=0, padx=4)
+    open_btn = ttk.Button(btns, text="Generate & open in QIDI Studio", command=lambda: generate("open"))
     open_btn.grid(row=0, column=1, padx=4)
-    if not studio_command():
-        open_btn.state(["disabled"])
+    send_btn = ttk.Button(btns, text="Generate & send to printer", command=lambda: generate("send"))
+    send_btn.grid(row=0, column=2, padx=4)
     row += 1
-    status = tk.StringVar()
     ttk.Label(frm, textvariable=status, wraplength=620, justify="left").grid(
         row=row, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
-    out_auto = {"value": ""}
+    auto = {"output": "", "r_output": ""}
 
     def store():
         return state["store"]
+
+    def retraction_tab():
+        return tabs.index(tabs.select()) == 1
+
+    def network_printers():
+        st = store()
+        return st.network_printers() if st else []
+
+    def update_buttons(_e=None):
+        ok = not state["busy"] and (can_slice or not retraction_tab())
+        gen_btn.state(["!disabled"] if ok else ["disabled"])
+        open_btn.state(["!disabled"] if ok and studio_command() else ["disabled"])
+        if retraction_tab():
+            send_btn.grid()
+            send_btn.state(["!disabled"] if ok and v["r_send"].get() else ["disabled"])
+        else:
+            send_btn.grid_remove()
+
+    def load_network_printers():
+        names = [p.get("name", "?") for p in network_printers()]
+        send_combo["values"] = names
+        if v["r_send"].get() not in names:
+            v["r_send"].set(names[0] if names else "")
+        if not names:
+            send_combo.set("(none set up in QIDI Studio)")
+            send_combo.state(["disabled"])
+            v["r_send"].set("")
+        else:
+            send_combo.state(["!disabled", "readonly"])
 
     def load_store():
         try:
@@ -267,6 +340,8 @@ def run_gui():
         combos["printer"]["values"] = machines
         v["printer"].set(sel_m if sel_m in machines else (machines[0] if machines else ""))
         refresh_lists(prefer_process=sel_p, prefer_filament=sel_f[0] if sel_f else None)
+        load_network_printers()
+        update_buttons()
         status.set("Loaded %d printer, %d process and %d filament presets from %s" % (
             len(machines), len(st.names("process")), len(st.names("filament")), st.root))
 
@@ -285,6 +360,7 @@ def run_gui():
             if cur not in names:
                 cur = names[0] if names else ""
             v[key].set(cur)
+        apply_retraction_defaults()
         on_filament()
 
     def on_filament(_e=None):
@@ -294,9 +370,11 @@ def run_gui():
             v["info"].set("")
             return
         cfg = st.resolve("filament", f)
-        v["info"].set("%s · recommended %s–%s °C · preset nozzle temp %s °C" % (
+        v["info"].set("%s · recommended %s–%s °C · preset nozzle temp %s °C · retraction %s mm" % (
             qp.first(cfg.get("filament_type"), "?"), qp.first(cfg.get("nozzle_temperature_range_low"), "?"),
-            qp.first(cfg.get("nozzle_temperature_range_high"), "?"), qp.first(cfg.get("nozzle_temperature"), "?")))
+            qp.first(cfg.get("nozzle_temperature_range_high"), "?"), qp.first(cfg.get("nozzle_temperature"), "?"),
+            rt.fmt(rt.preset_retraction(st, v["printer"].get(), f)) if v["printer"].get() else "?"))
+        v["r_temp"].set(str(int(qp.as_float(cfg.get("nozzle_temperature"), 210))))
         apply_filament_range()
 
     def apply_filament_range():
@@ -307,33 +385,57 @@ def run_gui():
         v["start"].set(str(s))
         v["end"].set(str(e))
         v["step"].set(str(step))
-        update_summary()
+        update_summaries()
 
-    def current_temps():
-        return tt.temperatures(int(v["start"].get()), int(v["end"].get()), int(v["step"].get()))
+    def apply_retraction_defaults():
+        st = store()
+        if not st or not v["printer"].get():
+            return
+        s, e, step = rt.defaults(st, v["printer"].get())
+        v["r_start"].set(rt.fmt(s))
+        v["r_end"].set(rt.fmt(e))
+        v["r_step"].set(rt.fmt(step))
+        update_summaries()
 
-    def update_summary():
-        try:
-            nums = [int(v[k].get()) for k in ("start", "end", "step")]
-        except ValueError:
-            v["summary"].set("Enter whole numbers")
-            return
-        try:
-            temps = tt.temperatures(*nums)
-        except ValueError as e:
-            v["summary"].set(str(e))
-            return
-        h = tt.tower_height(len(temps))
-        msg = "%d floors, %g mm tall: %s" % (len(temps), h, " → ".join(map(str, temps)))
+    def printer_height():
         st = store()
         if st and v["printer"].get():
-            max_h = qp.as_float(st.resolve("machine", v["printer"].get()).get("printable_height"), 0)
+            return qp.as_float(st.resolve("machine", v["printer"].get()).get("printable_height"), 0)
+        return 0
+
+    def auto_output(key, path):
+        if not v[key].get() or v[key].get() == auto[key]:
+            auto[key] = path
+            v[key].set(path)
+
+    def update_summaries():
+        st = store()
+        max_h = printer_height()
+        # Temperature tower
+        try:
+            temps = tt.temperatures(*[int(v[k].get()) for k in ("start", "end", "step")])
+            h = tt.tower_height(len(temps))
+            msg = "%d floors, %g mm tall: %s" % (len(temps), h, " → ".join(map(str, temps)))
             if max_h and h > max_h:
                 msg += "   ⚠ taller than the printer's %g mm" % max_h
+            if st and v["filament"].get():
+                auto_output("output", default_output(st, v["filament"].get(), temps))
+        except ValueError as e:
+            msg = str(e) if "step" in str(e) else "Enter whole numbers"
         v["summary"].set(msg)
-        if st and v["filament"].get() and (not v["output"].get() or v["output"].get() == out_auto["value"]):
-            out_auto["value"] = default_output(st, v["filament"].get(), temps)
-            v["output"].set(out_auto["value"])
+        # Retraction test
+        try:
+            values = rt.lengths(*[float(v[k].get()) for k in ("r_start", "r_end", "r_step")])
+            band = float(v["r_band"].get())
+            h = rt.test_height(len(values), band)
+            msg = "%d bands, %g mm tall: %s mm" % (len(values), h, " → ".join(rt.fmt(x) for x in values))
+            if max_h and h > max_h:
+                msg += "   ⚠ taller than the printer's %g mm" % max_h
+            if st and v["filament"].get():
+                auto_output("r_output", default_retraction_output(st, v["filament"].get(), values))
+        except ValueError as e:
+            msg = str(e) if "step" in str(e) or "negative" in str(e) else "Enter numbers"
+        v["r_summary"].set(msg)
 
     def browse_dir():
         d = filedialog.askdirectory(initialdir=v["dir"].get() or None, title="QIDI Studio data folder")
@@ -341,43 +443,118 @@ def run_gui():
             v["dir"].set(os.path.normpath(d))
             load_store()
 
-    def browse_out():
-        cur = v["output"].get()
-        p = filedialog.asksaveasfilename(defaultextension=".3mf", filetypes=[("3MF project", "*.3mf")],
+    def browse_out(key, kind):
+        cur = v[key].get()
+        types = [("G-code", "*.gcode")] if kind == "gcode" else [("3MF project", "*.3mf")]
+        p = filedialog.asksaveasfilename(defaultextension="." + kind, filetypes=types,
                                          initialdir=os.path.dirname(cur) or None,
                                          initialfile=os.path.basename(cur) or None)
         if p:
-            v["output"].set(os.path.normpath(p))
+            v[key].set(os.path.normpath(p))
 
-    def generate(open_after):
-        st = store()
-        if not st:
-            messagebox.showerror("Temperature tower", "QIDI Studio presets are not loaded.")
+    def finish(out, message, error, open_after):
+        state["busy"] = False
+        update_buttons()
+        if error:
+            status.set("")
+            messagebox.showerror(APP_NAME, error)
             return
-        try:
-            temps = current_temps()
-            out = v["output"].get().strip() or default_output(st, v["filament"].get(), temps)
-            if not out.lower().endswith(".3mf"):
-                out += ".3mf"
-            r = tt.write_3mf(out, temps, store=st, machine=v["printer"].get(), process=v["process"].get(),
-                             filament=v["filament"].get(), wait=v_wait.get(), embed_settings=v_embed.get())
-        except Exception as e:  # noqa: BLE001
-            traceback.print_exc()
-            messagebox.showerror("Temperature tower", str(e))
-            return
-        status.set("Saved %s\n%d floors, %g mm tall. Temperature changes (%s) at z = %s." % (
-            r["path"], r["floors"], r["height"], r["command"],
-            ", ".join("%g→%d°C" % c for c in r["changes"])))
+        status.set(message)
         if open_after:
             try:
                 open_in_studio(out)
             except OSError as e:
-                messagebox.showerror("Temperature tower", str(e))
+                messagebox.showerror(APP_NAME, str(e))
+
+    def generate(action):
+        """action: None (just save), "open" (open in QIDI Studio) or "send" (upload to the printer)."""
+        open_after = action == "open"
+        st = store()
+        if not st:
+            messagebox.showerror(APP_NAME, "QIDI Studio presets are not loaded.")
+            return
+        presets = dict(store=st, machine=v["printer"].get(), process=v["process"].get(),
+                       filament=v["filament"].get())
+        if not retraction_tab():
+            try:
+                temps = tt.temperatures(*[int(v[k].get()) for k in ("start", "end", "step")])
+                out = v["output"].get().strip() or default_output(st, presets["filament"], temps)
+                if not out.lower().endswith(".3mf"):
+                    out += ".3mf"
+                r = tt.write_3mf(out, temps, wait=v_wait.get(), embed_settings=v_embed.get(), **presets)
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc()
+                return finish(None, None, str(e), False)
+            return finish(out, "Saved %s\n%d floors, %g mm tall. Temperature changes (%s) at z = %s." % (
+                r["path"], r["floors"], r["height"], r["command"],
+                ", ".join("%g→%d°C" % c for c in r["changes"])), None, open_after)
+
+        try:
+            values = rt.lengths(*[float(v[k].get()) for k in ("r_start", "r_end", "r_step")])
+            band = float(v["r_band"].get())
+            temp = int(float(v["r_temp"].get())) if v["r_temp"].get().strip() else None
+        except ValueError as e:
+            return finish(None, None, str(e), False)
+        out = v["r_output"].get().strip() or default_retraction_output(st, presets["filament"], values)
+        if not out.lower().endswith(".gcode"):
+            out += ".gcode"
+        target = None
+        if action == "send":
+            try:
+                target = pick_network_printer(st, v["r_send"].get())
+            except ValueError as e:
+                return finish(None, None, str(e), False)
+            if v_print_now.get() and not messagebox.askyesno(
+                    APP_NAME, "Start printing on %s as soon as it's uploaded?\n\nMake sure the bed is clear "
+                    "and the right filament is loaded." % pu.describe(target)):
+                return
+        print_now = bool(target) and v_print_now.get()
+        state["busy"] = True
+        update_buttons()
+        # Slicing takes a while, so it runs on a worker thread. Tk may only be used from
+        # this thread, so the worker reports through a queue that the window polls.
+        messages = queue.Queue()
+
+        def work():
+            try:
+                r = rt.generate(out, values, band_h=band, nozzle_temp=temp,
+                                progress=lambda msg: messages.put(("progress", msg)), **presets)
+                summary = "Saved %s\n%d bands of %g mm (%g mm tall) at %s °C. Retraction from the bottom: %s mm." % (
+                    r["path"], r["bands"], band, r["height"], r["temperature"],
+                    ", ".join(rt.fmt(x) for x in values))
+                if target:
+                    messages.put(("progress", "Sending to %s…" % pu.describe(target)))
+                    pu.upload(target, out, start=print_now)
+                    summary += "\nUploaded to %s%s." % (pu.describe(target),
+                                                        " and started printing" if print_now else
+                                                        ". Start it from the printer's screen")
+                messages.put(("done", summary))
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc()
+                messages.put(("error", str(e)))
+
+        def poll():
+            try:
+                while True:
+                    kind, msg = messages.get_nowait()
+                    if kind == "progress":
+                        status.set(msg)
+                    elif kind == "done":
+                        return finish(out, msg, None, open_after)
+                    else:
+                        return finish(None, None, msg, False)
+            except queue.Empty:
+                root.after(100, poll)
+
+        threading.Thread(target=work, daemon=True).start()
+        poll()
 
     combos["printer"].bind("<<ComboboxSelected>>", lambda e: refresh_lists())
     combos["filament"].bind("<<ComboboxSelected>>", on_filament)
-    combos["process"].bind("<<ComboboxSelected>>", lambda e: update_summary())
+    combos["process"].bind("<<ComboboxSelected>>", lambda e: update_summaries())
+    tabs.bind("<<NotebookTabChanged>>", update_buttons)
     load_store()
+    update_buttons()
     root.mainloop()
 
 
@@ -435,8 +612,18 @@ def attach_console():
         print()  # the shell has already printed its prompt
 
 
+def main():
+    if len(sys.argv) == 1:
+        return run_gui()
+    attach_console()
+    try:
+        return run_cli(sys.argv[1:])
+    except (ValueError, RuntimeError, OSError, KeyError) as e:
+        # Report expected problems plainly. Left unhandled, the windowed app would show
+        # an "Unhandled exception" dialog and sit waiting for a click.
+        print("Error: %s" % e, file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        attach_console()
-        sys.exit(run_cli(sys.argv[1:]))
-    run_gui()
+    sys.exit(main())

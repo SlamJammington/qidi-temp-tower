@@ -1,0 +1,9 @@
+{
+    "type": "machine",
+    "name": "Other Printer 0.4 nozzle",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "fdm_machine_test_common",
+    "printer_model": "Other Printer",
+    "printer_variant": "0.4"
+}

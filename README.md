@@ -1,6 +1,9 @@
-# QIDI Studio Temperature Tower Generator
+# QIDI Studio Temperature Tower & Retraction Test
 
-QIDI Studio doesn't have a temperature tower calibration, so this app makes one. Pick your printer, process and filament from your QIDI Studio presets and choose a temperature range. It writes a ready-to-slice `.3mf` where each floor prints at a different temperature, with that temperature engraved on the front.
+QIDI Studio doesn't have temperature tower or retraction test calibrations, so this app makes them. Pick your printer, process and filament from your QIDI Studio presets and choose a range:
+
+- **Temperature tower:** a ready-to-slice `.3mf` where each floor prints at a different temperature, with that temperature engraved on the front.
+- **Retraction test:** two towers whose bands print with different retraction lengths, each labelled. QIDI Studio can't vary retraction by height, so the app slices this one for you with QIDI Studio and saves ready-to-print G-code. QIDI Studio can preview that file but can't send it, so the app can upload it to the network printer you set up in QIDI Studio. You can also copy it to the printer yourself.
 
 ![Generator window](docs/generator.png)
 
@@ -18,9 +21,13 @@ Get the latest version from the [Releases page](https://github.com/SlamJammingto
 
 The apps aren't code-signed, so your system will warn you the first time. On Windows, click **More info → Run anyway**. On macOS, right-click → **Open**.
 
-## Reading the tower
+The retraction test needs QIDI Studio installed on the same computer, because the app uses it to slice the test.
 
-Each 10 mm floor has a 45° and a 35° overhang, a bridge, two stringing cones and a couple of holes. Pick the floor that looks best overall. Hotter usually means stronger layers and more stringing. Cooler usually means cleaner overhangs and bridges.
+## Reading the results
+
+**Temperature tower:** each 10 mm floor has a 45° and a 35° overhang, a bridge, two stringing cones and a couple of holes. Pick the floor that looks best overall. Hotter usually means stronger layers and more stringing. Cooler usually means cleaner overhangs and bridges.
+
+**Retraction test:** print it at the temperature you picked from the tower. Look at the strings between the two towers and find the lowest band without strings or blobs. Use that band's length (engraved on the left tower) as your retraction length. Going much higher than needed can cause under-extrusion and wear on the filament.
 
 ## Running from source
 

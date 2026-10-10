@@ -167,7 +167,26 @@ class PresetStore:
 
     # --------------------------------------------------------------- listing
     def names(self, kind):
-        return sorted((p.name for p in self.presets[kind].values() if p.visible), key=str.lower)
+        presets = [p for p in self.presets[kind].values() if p.visible]
+        if kind == "machine":
+            presets = [p for p in presets if self._machine_added(p)]
+        return sorted((p.name for p in presets), key=str.lower)
+
+    def _machine_added(self, preset):
+        """Whether QIDI Studio shows this printer: user printers always; system printers only
+        for the printer models and nozzle sizes the user added (QIDIStudio.conf "models")."""
+        models = self.app_config.get("models") if isinstance(self.app_config, dict) else None
+        if not preset.system or not models:
+            return True
+        cfg = self.resolve("machine", preset.name)
+        model = cfg.get("printer_model")
+        nozzle = str(cfg.get("printer_variant") or first(cfg.get("nozzle_diameter")) or "")
+        for m in models:
+            if isinstance(m, dict) and m.get("model") == model:
+                sizes = [s.strip() for s in str(m.get("nozzle_diameter", "")).split(";") if s.strip()]
+                if not sizes or not nozzle or nozzle in sizes:
+                    return True
+        return False
 
     def compatible(self, kind, name, machine):
         """Whether a filament/process preset lists the machine (or its system parent)."""
@@ -191,6 +210,28 @@ class PresetStore:
     def app_version(self):
         app = self.app_config.get("app", {}) if isinstance(self.app_config, dict) else {}
         return app.get("version") or "02.07.02.60"
+
+    def network_printers(self):
+        """Printers set up in QIDI Studio for sending prints over the network ("physical printers")."""
+        found = []
+        userdir = os.path.join(self.root, "user")
+        if not os.path.isdir(userdir):
+            return found
+        for uid in sorted(os.listdir(userdir)):
+            d = os.path.join(userdir, uid, "physical_printer")
+            if not os.path.isdir(d):
+                continue
+            for fn in sorted(os.listdir(d)):
+                if not fn.endswith(".json"):
+                    continue
+                try:
+                    data = read_json(os.path.join(d, fn))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(data, dict) and data.get("print_host"):
+                    data.setdefault("name", os.path.splitext(fn)[0])
+                    found.append(data)
+        return found
 
 
 def first(v, default=None):

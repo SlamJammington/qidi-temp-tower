@@ -65,8 +65,8 @@ class Mesh:
         t = struct.unpack("<%dI" % (3 * d["tcount"]), base64.b64decode(d["triangles"]))
         return cls([v[i:i + 3] for i in range(0, len(v), 3)], [t[i:i + 3] for i in range(0, len(t), 3)])
 
-    def moved(self, dx=0.0, dy=0.0, dz=0.0, sx=1.0):
-        return Mesh([(x * sx + dx, y + dy, z + dz) for x, y, z in self.verts], list(self.tris))
+    def moved(self, dx=0.0, dy=0.0, dz=0.0, sx=1.0, sz=1.0):
+        return Mesh([(x * sx + dx, y + dy, z * sz + dz) for x, y, z in self.verts], list(self.tris))
 
     def extend(self, *others):
         for other in others:
@@ -190,22 +190,36 @@ def digits():
     return _digits
 
 
-def label_mesh(text, z0):
-    """Engraving prisms for `text`, centred on the front of the label block of the floor at z0."""
+def text_mesh(text, cx, cz, max_width, height=None):
+    """Engraving prisms for `text` on the front face (y=0), centred on (cx, cz).
+
+    `height` scales the ink height (default: the glyphs' own 7 mm); the text
+    is squeezed horizontally if it would be wider than `max_width`.
+    """
     font = digits()
-    adv, glyphs = font["advance"], font["glyphs"]
+    glyphs = font["glyphs"]
+    scale = height / font["digit_height"] if height else 1.0
+    pens, pen = [], 0.0
+    for ch in text:
+        pens.append(pen)
+        pen += glyphs[ch].get("advance", font["advance"])
     left = glyphs[text[0]]["xmin"]
-    right = (len(text) - 1) * adv + glyphs[text[-1]]["xmax"]
-    width = right - left
-    sx = min(1.0, LABEL_MAX_WIDTH / width) if width > 0 else 1.0
+    right = pens[-1] + glyphs[text[-1]]["xmax"]
+    width = (right - left) * scale
+    sx = scale * (min(1.0, max_width / width) if width > 0 else 1.0)
     zmin = min(glyphs[c]["zmin"] for c in text)
     zmax = max(glyphs[c]["zmax"] for c in text)
-    dz = z0 + FLOOR_H / 2 - BRIDGE_T / 2 - (zmin + zmax) / 2
-    x0 = BLOCK_W / 2 - (left + width / 2) * sx
+    dz = cz - (zmin + zmax) / 2 * scale
+    x0 = cx - (left + right) / 2 * sx
     out = Mesh()
-    for i, ch in enumerate(text):
-        out.extend(font["mesh"][ch].moved(dx=x0 + i * adv * sx, dz=dz, sx=sx))
+    for ch, p in zip(text, pens):
+        out.extend(font["mesh"][ch].moved(dx=x0 + p * sx, dz=dz, sx=sx, sz=scale))
     return out
+
+
+def label_mesh(text, z0):
+    """Engraving prisms for `text`, centred on the front of the label block of the floor at z0."""
+    return text_mesh(text, BLOCK_W / 2, z0 + FLOOR_H / 2 - BRIDGE_T / 2, LABEL_MAX_WIDTH)
 
 
 def tower_height(n_floors):

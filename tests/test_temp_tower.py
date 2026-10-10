@@ -27,6 +27,10 @@ class PresetTests(unittest.TestCase):
         self.assertEqual(f["nozzle_temperature_initial_layer"], ["215"])  # from the abstract parent
         self.assertEqual(f["filament_id"], "TST01")                  # from the system preset
 
+    def test_only_added_printer_models_are_listed(self):
+        # QIDIStudio.conf "models" lists Test Printer only, so Other Printer stays hidden like in QIDI Studio.
+        self.assertEqual(self.store.names("machine"), ["My Printer", "Test Printer 0.4 nozzle"])
+
     def test_abstract_presets_hidden(self):
         self.assertNotIn("fdm_filament_test_common", self.store.names("filament"))
         self.assertIn("My PLA", self.store.names("filament"))

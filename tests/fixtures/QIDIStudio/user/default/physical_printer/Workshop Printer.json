@@ -1,0 +1,10 @@
+{
+    "from": "User",
+    "host_type": "octoprint",
+    "name": "Workshop Printer",
+    "preset_name": "My Printer",
+    "print_host": "192.0.2.10",
+    "printhost_apikey": "",
+    "printhost_port": "",
+    "printer_technology": "FFF"
+}
